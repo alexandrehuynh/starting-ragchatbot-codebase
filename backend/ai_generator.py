@@ -1,8 +1,8 @@
-import anthropic
+import google.generativeai as genai
 from typing import List, Optional, Dict, Any
 
 class AIGenerator:
-    """Handles interactions with Anthropic's Claude API for generating responses"""
+    """Handles interactions with Google's Gemini API for generating responses"""
     
     # Static system prompt to avoid rebuilding on each call
     SYSTEM_PROMPT = """ You are an AI assistant specialized in course materials and educational content with access to a comprehensive search tool for course information.
@@ -29,16 +29,14 @@ All responses must be:
 Provide only the direct answer to what was asked.
 """
     
-    def __init__(self, api_key: str, model: str):
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.model = model
-        
-        # Pre-build base API parameters
-        self.base_params = {
-            "model": self.model,
-            "temperature": 0,
-            "max_tokens": 800
-        }
+    def __init__(self, api_key: str, model: str = "gemini-2.0-flash"):
+        # Configure Gemini
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(
+            model,
+            system_instruction=self.SYSTEM_PROMPT
+        )
+        self.model_name = model
     
     def generate_response(self, query: str,
                          conversation_history: Optional[str] = None,
@@ -57,79 +55,38 @@ Provide only the direct answer to what was asked.
             Generated response as string
         """
         
-        # Build system content efficiently - avoid string ops when possible
-        system_content = (
-            f"{self.SYSTEM_PROMPT}\n\nPrevious conversation:\n{conversation_history}"
-            if conversation_history 
-            else self.SYSTEM_PROMPT
-        )
+        # Build prompt with conversation history
+        full_prompt = query
+        if conversation_history:
+            full_prompt = f"Previous conversation:\n{conversation_history}\n\nCurrent question: {query}"
         
-        # Prepare API call parameters efficiently
-        api_params = {
-            **self.base_params,
-            "messages": [{"role": "user", "content": query}],
-            "system": system_content
-        }
-        
-        # Add tools if available
-        if tools:
-            api_params["tools"] = tools
-            api_params["tool_choice"] = {"type": "auto"}
-        
-        # Get response from Claude
-        response = self.client.messages.create(**api_params)
-        
-        # Handle tool execution if needed
-        if response.stop_reason == "tool_use" and tool_manager:
-            return self._handle_tool_execution(response, api_params, tool_manager)
-        
-        # Return direct response
-        return response.content[0].text
-    
-    def _handle_tool_execution(self, initial_response, base_params: Dict[str, Any], tool_manager):
-        """
-        Handle execution of tool calls and get follow-up response.
-        
-        Args:
-            initial_response: The response containing tool use requests
-            base_params: Base API parameters
-            tool_manager: Manager to execute tools
+        # Since Gemini doesn't have native tool support like Anthropic,
+        # we'll simulate it by detecting course-related queries and searching
+        if tools and tool_manager:
+            # Check if this is a course-related query
+            course_keywords = ['course', 'lesson', 'outline', 'chatbot', 'RAG', 'MCP', 
+                             'available', 'curriculum', 'topics', 'explain']
             
-        Returns:
-            Final response text after tool execution
-        """
-        # Start with existing messages
-        messages = base_params["messages"].copy()
+            if any(keyword.lower() in query.lower() for keyword in course_keywords):
+                # Execute search tool
+                try:
+                    tool_result = tool_manager.execute_tool("search_course_content", query=query)
+                    
+                    # Add search results to prompt
+                    full_prompt = f"Question: {query}\n\nRelevant course information:\n{tool_result}\n\nBased on the above information, provide a comprehensive answer."
+                except:
+                    pass  # If tool fails, just use regular prompt
         
-        # Add AI's tool use response
-        messages.append({"role": "assistant", "content": initial_response.content})
-        
-        # Execute all tool calls and collect results
-        tool_results = []
-        for content_block in initial_response.content:
-            if content_block.type == "tool_use":
-                tool_result = tool_manager.execute_tool(
-                    content_block.name, 
-                    **content_block.input
-                )
-                
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": content_block.id,
-                    "content": tool_result
-                })
-        
-        # Add tool results as single message
-        if tool_results:
-            messages.append({"role": "user", "content": tool_results})
-        
-        # Prepare final API call without tools
-        final_params = {
-            **self.base_params,
-            "messages": messages,
-            "system": base_params["system"]
-        }
-        
-        # Get final response
-        final_response = self.client.messages.create(**final_params)
-        return final_response.content[0].text
+        # Generate response with Gemini
+        try:
+            response = self.model.generate_content(
+                full_prompt,
+                generation_config={
+                    "temperature": 0,
+                    "max_output_tokens": 800,
+                }
+            )
+            return response.text
+        except Exception as e:
+            return f"Error generating response: {str(e)}"
+    
